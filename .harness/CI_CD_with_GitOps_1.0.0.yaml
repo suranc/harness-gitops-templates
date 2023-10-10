@@ -1,0 +1,257 @@
+template:
+  name: CI CD with GitOps
+  type: Pipeline
+  projectIdentifier: gitopsteam1
+  orgIdentifier: gitopsorg1
+  spec:
+    stages:
+      - stage:
+          name: Preprocessing
+          identifier: Preprocessing
+          description: ""
+          type: Custom
+          spec:
+            execution:
+              steps:
+                - step:
+                    type: ShellScript
+                    name: Prepare Variables
+                    identifier: Prepare_Variables
+                    spec:
+                      shell: Bash
+                      onDelegate: true
+                      source:
+                        type: Inline
+                        spec:
+                          script: |-
+                            export DOCKER_REGISTRY=$(echo <+pipeline.variables.docker_image> | cut -d'/' -f1)
+                            export DOCKER_REPOSITORY=$(echo <+pipeline.variables.docker_image> | cut -d'/' -f2-)
+                      environmentVariables: []
+                      outputVariables:
+                        - name: docker_registry
+                          type: String
+                          value: DOCKER_REGISTRY
+                        - name: docker_repository
+                          type: String
+                          value: DOCKER_REPOSITORY
+                    timeout: 10m
+          tags: {}
+      - stage:
+          name: Build and Scan Docker Image
+          identifier: Build_and_Scan_Docker_Image
+          type: CI
+          spec:
+            cloneCodebase: true
+            infrastructure:
+              type: KubernetesDirect
+              spec:
+                connectorRef: <+input>
+                namespace: <+input>
+                automountServiceAccountToken: true
+                nodeSelector: {}
+                os: Linux
+            execution:
+              steps:
+                - step:
+                    type: Background
+                    name: Dind
+                    identifier: Dind
+                    spec:
+                      connectorRef: account.Artifactory
+                      image: docker:dind
+                      shell: Sh
+                      command: dockerd
+                      privileged: true
+                - step:
+                    type: BuildAndPushDockerRegistry
+                    name: Build Image
+                    identifier: Build_Image
+                    spec:
+                      connectorRef: <+input>
+                      repo: <+pipeline.variables.docker_image>
+                      tags:
+                        - <+pipeline.variables.docker_tag>
+                      resources:
+                        limits:
+                          memory: 2Gi
+                          cpu: "1"
+                - step:
+                    type: Grype
+                    name: Scan Image with Grype
+                    identifier: Scan_Image_with_Grype
+                    spec:
+                      mode: orchestration
+                      config: default
+                      target:
+                        name: <+pipeline.variables.docker_image>
+                        type: container
+                        variant: <+pipeline.variables.docker_tag>
+                      advanced:
+                        log:
+                          level: info
+                      privileged: true
+                      image:
+                        type: docker_v2
+                        name: <+pipeline.stages.Preprocessing.spec.execution.steps.Prepare_Variables.output.outputVariables.docker_repository>
+                        domain: <+pipeline.stages.Preprocessing.spec.execution.steps.Prepare_Variables.output.outputVariables.docker_registry>
+                        tag: <+pipeline.variables.docker_tag>
+            sharedPaths:
+              - /var/run
+            caching:
+              enabled: false
+              paths: []
+      - stage:
+          name: Deploy to Staging
+          identifier: Deploy_to_Staging
+          description: ""
+          type: Deployment
+          spec:
+            deploymentType: Kubernetes
+            gitOpsEnabled: true
+            service:
+              serviceRef: springforwardcustomize
+              serviceInputs:
+                serviceDefinition:
+                  type: Kubernetes
+                  spec:
+                    artifacts:
+                      primary:
+                        primaryArtifactRef: <+input>
+                        sources: <+input>
+            execution:
+              steps:
+                - step:
+                    type: GitOpsUpdateReleaseRepo
+                    name: Update Release Repo
+                    identifier: updateReleaseRepo
+                    timeout: 10m
+                    spec:
+                      variables:
+                        - name: imageTag
+                          type: String
+                          value: <+artifacts.primary.tag>
+                - step:
+                    type: MergePR
+                    name: Merge PR
+                    identifier: mergePR
+                    spec:
+                      deleteSourceBranch: true
+                    timeout: 10m
+                - step:
+                    type: GitOpsSync
+                    name: Sync App
+                    identifier: Sync_App
+                    spec:
+                      prune: false
+                      dryRun: false
+                      applyOnly: false
+                      forceApply: false
+                      applicationsList:
+                        - applicationName: staging-spring-forward
+                          agentId: org.gitopsteam1
+                      retryStrategy: {}
+                      retry: false
+                      syncOptions:
+                        skipSchemaValidation: false
+                        autoCreateNamespace: false
+                        pruneResourcesAtLast: false
+                        applyOutOfSyncOnly: false
+                        replaceResources: false
+                        prunePropagationPolicy: foreground
+                    timeout: 10m
+              rollbackSteps: []
+            environment:
+              environmentRef: staging
+              deployToAll: true
+          tags: {}
+          failureStrategies:
+            - onFailure:
+                errors:
+                  - AllErrors
+                action:
+                  type: StageRollback
+      - stage:
+          name: Deploy to Production
+          identifier: Deploy_to_Production
+          description: ""
+          type: Deployment
+          spec:
+            deploymentType: Kubernetes
+            gitOpsEnabled: true
+            execution:
+              steps:
+                - step:
+                    type: GitOpsUpdateReleaseRepo
+                    name: Update Release Repo
+                    identifier: updateReleaseRepo
+                    timeout: 10m
+                    spec: {}
+                - step:
+                    type: MergePR
+                    name: Merge PR
+                    identifier: mergePR
+                    spec:
+                      deleteSourceBranch: true
+                    timeout: 10m
+                - step:
+                    type: GitOpsFetchLinkedApps
+                    name: Fetch Linked Apps
+                    identifier: fetchLinkedApps
+                    timeout: 10m
+                    spec: {}
+                - step:
+                    type: GitOpsSync
+                    name: Sync Apps
+                    identifier: Sync_Apps
+                    spec:
+                      prune: false
+                      dryRun: false
+                      applyOnly: false
+                      forceApply: false
+                      applicationsList: []
+                      retryStrategy: {}
+                      retry: false
+                      syncOptions:
+                        skipSchemaValidation: false
+                        autoCreateNamespace: false
+                        pruneResourcesAtLast: false
+                        applyOutOfSyncOnly: false
+                        replaceResources: false
+                        prunePropagationPolicy: foreground
+                    timeout: 10m
+              rollbackSteps: []
+            service:
+              useFromStage:
+                stage: Deploy_to_Staging
+            environment:
+              environmentRef: production
+              deployToAll: false
+              gitOpsClusters:
+                - identifier: org.incluster
+          tags: {}
+          failureStrategies:
+            - onFailure:
+                errors:
+                  - AllErrors
+                action:
+                  type: StageRollback
+    properties:
+      ci:
+        codebase:
+          connectorRef: GitLab_Account
+          repoName: root/spring-forward-harness-example
+          build: <+input>
+    variables:
+      - name: docker_image
+        type: String
+        description: The image name where the image being built will be pushed to
+        required: false
+        value: <+input>
+      - name: docker_tag
+        type: String
+        description: This is the tag to apply to the image being built
+        required: false
+        value: <+input>.default(harness-<+codebase.commitSha>)
+    allowStageExecutions: true
+  identifier: CI_CD_with_GitOps
+  versionLabel: 1.0.0
