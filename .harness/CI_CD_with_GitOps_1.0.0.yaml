@@ -49,6 +49,7 @@ template:
                 namespace: <+input>
                 automountServiceAccountToken: true
                 nodeSelector: {}
+                harnessImageConnectorRef: <+input>
                 os: Linux
             execution:
               steps:
